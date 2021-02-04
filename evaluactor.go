@@ -1,7 +1,6 @@
 package evaluactor
 
 import (
-	"github.com/Shopify/go-lua"
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/cbor"
@@ -11,6 +10,7 @@ import (
 	"github.com/filecoin-project/specs-actors/v2/actors/runtime"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
+	lua "github.com/yuin/gopher-lua"
 )
 
 //go:generate go run ./gen
@@ -87,21 +87,36 @@ type EvalReturn struct {
 func (a Actor) Eval(rt runtime.Runtime, params *EvalParams) *EvalReturn {
 	rt.ValidateImmediateCallerAcceptAny()
 	var res string
-	l := lua.NewState()
-	lua.OpenLibraries(l)
+	L := lua.NewState()
+	defer L.Close()
 
-	_ = lua.NewMetaTable(l, "filMetaTable")
-	lua.SetFunctions(l, []lua.RegistryFunction{{
-		Name: "setresult",
-		Function: func(l *lua.State) int {
-			res = lua.CheckString(l, 1)
-			return 0
-		},
-	}}, 0)
-	l.SetGlobal("fil")
-	lua.SetMetaTableNamed(l, "filMetaTable")
+	L.PreloadModule("fil", func(L *lua.LState) int {
+		// register functions to the table
+		mod := L.SetFuncs(L.NewTable(), map[string]lua.LGFunction{
+			"set_result": func(L *lua.LState) int {
+				res = L.ToString(1)
+				return 0
+			},
+		})
+		lrt := L.SetFuncs(L.NewTable(), map[string]lua.LGFunction{
+			"caller": func(L *lua.LState) int {
+				L.Push(lua.LString(rt.Caller().String()))
+				return 1
+			},
+			"value_received": func(L *lua.LState) int {
+				L.Push(lua.LString(rt.ValueReceived().String()))
+				return 1
+			},
+		})
+		// register other stuff
+		L.SetField(mod, "runtime", lrt)
 
-	err := lua.DoString(l, params.Script)
+		// returns the module
+		L.Push(mod)
+		return 1
+	})
+
+	err := L.DoString(params.Script)
 	if err != nil {
 		rt.Abortf(ErrScriptRunFailure, "run script failure: %v", err)
 	}
